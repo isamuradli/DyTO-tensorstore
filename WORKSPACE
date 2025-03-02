@@ -2,8 +2,23 @@ workspace(
     name = "tensorstore",
 )
 
-load("//:external.bzl", "tensorstore_dependencies")
+# Load rules_foreign_cc
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+load("@bazel_tools//tools/build_defs/repo:utils.bzl", "maybe")
 
+maybe(
+    http_archive,
+    name = "rules_foreign_cc",
+    urls = ["https://github.com/bazelbuild/rules_foreign_cc/archive/refs/tags/0.5.0.tar.gz"],
+    strip_prefix = "rules_foreign_cc-0.5.0",
+    sha256 = "ed8068eea78cdccb8a638b3b4b49dd333db01ec83879f3fcd460cc8b6aeaa0c6",
+)
+
+load("@rules_foreign_cc//foreign_cc:repositories.bzl", "rules_foreign_cc_dependencies")
+rules_foreign_cc_dependencies()
+
+
+load("//:external.bzl", "tensorstore_dependencies")
 tensorstore_dependencies()
 
 load("@bazel_features//:deps.bzl", "bazel_features_deps")
