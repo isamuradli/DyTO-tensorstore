@@ -121,3 +121,33 @@ tensorstore_cc_binary(
         "@com_google_riegeli//riegeli/bytes:writer",
     ],
 )
+
+
+tensorstore_cc_binary(
+    name = "custom_example",
+    srcs = ["custom_example.cc"],
+    deps = [
+        "@tensorstore//tensorstore",
+        "@tensorstore//tensorstore/driver/zarr:zarr",
+        "@tensorstore//tensorstore/kvstore/file:file",
+        "@tensorstore//tensorstore/kvstore/rocksdb:rocksdb",
+        "@tensorstore//tensorstore:open",
+        "@tensorstore//tensorstore:open_mode",
+        "@tensorstore//tensorstore:array",
+        "@tensorstore//tensorstore/util:status",
+        "@com_facebook_rocksdb//:rocksdb",
+        "@com_google_absl//absl/types:optional",
+
+    ],
+    copts = ["-g", "-O0"],  # Add debug symbols, disable optimization
+)
+
+
+tensorstore_cc_binary(
+    name = "callrocks",
+    srcs = ["callrocks.cc"],
+    deps = [
+        "@com_facebook_rocksdb//:rocksdb",
+        "//tensorstore",
+    ],
+)
