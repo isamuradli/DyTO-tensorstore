@@ -1,0 +1,4 @@
+cc_library(
+    name = "com_facebook_rocksdb", 
+    visibility = ["//visibility:public"],
+)

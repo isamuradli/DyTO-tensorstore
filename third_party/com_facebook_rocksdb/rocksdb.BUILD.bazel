@@ -1,0 +1,31 @@
+load("@rules_foreign_cc//foreign_cc:defs.bzl", "cmake")
+
+# Create a filegroup to collect all the files needed for RocksDB
+filegroup(
+    name = "rocksdb_all_files",
+    srcs = glob(
+        ["**"],  # Include all files in the directory
+        exclude = ["*.bazel", "WORKSPACE"],  # Exclude Bazel-specific files
+    ),
+    visibility = ["//visibility:public"],
+)
+
+# Use the cmake rule to build RocksDB
+cmake(
+    name = "rocksdb",
+    lib_source = ":rocksdb_all_files",  # Use the filegroup we created
+    cache_entries = {
+        "CMAKE_INSTALL_LIBDIR": "lib",  # Define the installation directory for libraries
+        "WITH_GLFAGS": "OFF",  # Enable building shared libraries
+        "WITH_TESTS": "OFF",  # Enable building static libraries
+        "WITH_TOOLS": "OFF",  # Disable building tests
+        "WITH_BENCHMARK_TOOLS": "OFF",  # Disable building benchmarks
+    },
+    out_static_libs = [
+        "librocksdb.a",  # Static library output
+    ],
+    out_shared_libs = [
+        "librocksdb.so",  # Shared library output
+    ],
+    visibility = ["//visibility:public"],
+)
