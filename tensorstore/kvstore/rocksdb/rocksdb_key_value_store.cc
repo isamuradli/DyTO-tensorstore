@@ -79,7 +79,7 @@ using ::tensorstore::internal::DataCopyConcurrencyResource;
 using ::tensorstore::kvstore::ReadResult;
 
 struct RocksDBSpecData {
-  bool create_if_missing = true;  // Create DB if it doesn't exist
+  bool create_if_missing = false;  // Create DB if it doesn't exist
   Context::Resource<DataCopyConcurrencyResource> data_copy_concurrency;
 
   constexpr static auto ApplyMembers = [](auto& x, auto f) {
@@ -160,6 +160,8 @@ class RocksDB
 absl::Status RocksDB::OpenDB() {
   rocksdb::Options options;
   options.create_if_missing = spec_.create_if_missing;
+  std::cout << "Opening DB with createIfMissing: " << spec_.create_if_missing
+            << endl;
   std::string db_path = "testdb";
   Status status = rocksdb::DB::Open(options, db_path, &db_);
 
@@ -194,14 +196,9 @@ Future<kvstore::DriverPtr> RocksDBSpec::DoOpen() const {
 }
 
 Future<ReadResult> RocksDB::Read(Key key, ReadOptions options) {
-  std::cout << "Entering RocksDB::Read " << std::endl;
+  std::cout << "\nEntering RocksDB::Read " << std::endl;
   absl::Cord value;
   std::string result_value;
-
-  cout << "Key is  " << key << endl;
-  std::cout << "Exiting Rocksdb::Read" << std::endl;
-
-  // return std::move(future);
 
   return internal_kvstore_batch::HandleBatchRequestByGenericByteRangeCoalescing(
       *this, std::move(key), std::move(options));
@@ -209,22 +206,19 @@ Future<ReadResult> RocksDB::Read(Key key, ReadOptions options) {
 
 Future<kvstore::ReadResult> RocksDB::ReadImpl(Key&& key,
                                               ReadOptions&& options) {
-  std::cout << "Inside ReadImpl()" << endl;
   auto [promise, future] = PromiseFuturePair<ReadResult>::Make();
   if (!db_) {
     promise.SetResult(absl::InternalError("Database not open"));
   }
 
   std::string value;
-  std::cout << "db->Get is calling..." << std::endl;
   std::string gen_key = key + "_generation";  // Key to store generation
   std::string gen_number;  // stores the version of the key-value pair
   Status status = db_->Get(rocksdb::ReadOptions(), key, &value);
   Status status_gen = db_->Get(rocksdb::ReadOptions(), gen_key, &gen_number);
 
-  std::cout << "Key is : " << key << endl;
-  std::cout << "Value is : " << value << endl;
-  std::cout << "Generation number is : " << gen_number << endl;
+  std::cout << "Key is : " << key << "  Value is : " << value
+            << "  Generation number is : " << gen_number << endl;
 
   // Key found
   if (status.ok() && status_gen.ok()) {
@@ -232,7 +226,7 @@ Future<kvstore::ReadResult> RocksDB::ReadImpl(Key&& key,
         absl::Cord(value),
         GenerationNow(StorageGeneration::FromUint64(
             std::stoi(gen_number)))));  // Generation not tracked in RocksDB
-    std::cout << "Found key" << std::endl;
+    // std::cout << "Found key" << std::endl;
   }
   // Ket not found
   else if (status.IsNotFound()) {
@@ -245,8 +239,6 @@ Future<kvstore::ReadResult> RocksDB::ReadImpl(Key&& key,
     std::cout << "Error occurred reading from DB: " << status.ToString()
               << endl;
   }
-  std::cout << "Returning future to HandleBatchRequestByGenericByteRange"
-            << std::endl;
 
   return std::move(future);
 }  // namespace internal_rocksdb_kvstore
@@ -282,28 +274,19 @@ absl::Status RocksDB::WriteToRocksDB(
   std::cout << "Writing : Key:" << key << " Value: " << value.value() << endl;
   absl::MutexLock lock(&mu_);  // Acquire mutex to protect counter
 
-  std::string value;
-  auto status = db_->Get(rocksdb::ReadOptions(), key, &value);
+  std::string current_generation;
+  auto status = db_->Get(rocksdb::ReadOptions(), gen_key, &current_generation);
 
-  if (status.ok()) {
-    std::stringstream ss(current_generation);
-    ss >> generation_number;
-  } else if (status.IsNotFound()) {
-    generation_number = 0;  // if data is not found, generation number is 0
-  } else {
-    // Handle other errors appropriately
-    promise.SetResult(absl::InternalError(
-        absl::StrCat("RocksDB Get failed: ", status.ToString())));
-    return absl::InternalError(
-        absl::StrCat("RocksDB Get failed: ", status.ToString()));
-  }
-
-  if (value) {
-    if (generation_number > 0 &&
-        options.generation_conditions.if_equal !=
-            StorageGeneration::FromUint64(generation_number)) {
-      promise.SetResult(absl::FailedPreconditionError("Generation mismatch"));
-      return absl::FailedPreconditionError("Generation mismatch");
+  if (status.IsNotFound()) {
+    // Key does not exist
+    if (!options.generation_conditions.MatchesNoValue()) {
+      promise.SetResult(GenerationNow(StorageGeneration::Unknown()));
+      return absl::InternalError(
+          absl::StrCat("Unknown generation", status.ToString()));
+    }
+    if (!value) {
+      promise.SetResult(GenerationNow(StorageGeneration::NoValue()));
+      return absl::InternalError(absl::StrCat("No value", status.ToString()));
     }
 
     // Converts Cord type to string
@@ -313,8 +296,9 @@ absl::Status RocksDB::WriteToRocksDB(
 
     // std::string value_str = absl::Cord(*value).ToString();
     std::stringstream ss;
-    ss << ++generation_number;  // increment the generation number upon updating
-                                // the data
+    uint64_t generation_number = next_generation_number_++;
+    ss << generation_number;  // increment the generation number upon
+                              // updating the data
     auto status =
         db_->Put(rocksdb::WriteOptions(), key, value_str);  // write value
     auto generation_status = db_->Put(rocksdb::WriteOptions(), gen_key,
@@ -329,7 +313,16 @@ absl::Status RocksDB::WriteToRocksDB(
     promise.SetResult(
         GenerationNow(StorageGeneration::FromUint64(generation_number)));
     return absl::OkStatus();
-  } else {
+  }
+
+  // Key exists
+  if (!options.generation_conditions.Matches(
+          StorageGeneration::FromUint64(std::stoi(current_generation)))) {
+    promise.SetResult(GenerationNow(StorageGeneration::Unknown()));
+    return absl::FailedPreconditionError("Generation Unknown");
+  }
+
+  if (!value) {
     auto status = db_->Delete(rocksdb::WriteOptions(), key);
     auto generation_status = db_->Delete(rocksdb::WriteOptions(), gen_key);
 
@@ -342,6 +335,32 @@ absl::Status RocksDB::WriteToRocksDB(
     promise.SetResult(GenerationNow(StorageGeneration::NoValue()));
     return absl::OkStatus();
   }
+
+  // Convert Cord type to string
+  std::ostringstream oss;
+  oss << value.value();
+  std::string value_str = oss.str();
+
+  // std::string value_str = absl::Cord(*value).ToString();
+  std::stringstream ss;
+  uint64_t generation_number = next_generation_number_++;
+  std::cout << "Generation number is : " << generation_number << endl;
+  ss << generation_number;  // increment the generation number upon
+                            // updating the data
+  auto write_status =
+      db_->Put(rocksdb::WriteOptions(), key, value_str);  // write value
+  auto generation_status = db_->Put(rocksdb::WriteOptions(), gen_key,
+                                    ss.str());  // write generation
+
+  if (!write_status.ok() || !generation_status.ok()) {
+    promise.SetResult(absl::InternalError(
+        absl::StrCat("RocksDB Put failed: ", write_status.ToString())));
+    return absl::InternalError(
+        absl::StrCat("RocksDB Put failed: ", write_status.ToString()));
+  }
+  promise.SetResult(
+      GenerationNow(StorageGeneration::FromUint64(generation_number)));
+  return absl::OkStatus();
 }
 
 }  // namespace internal_rocksdb_kvstore
