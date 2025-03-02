@@ -60,6 +60,7 @@ load("//third_party:rules_proto/workspace.bzl", repo_rules_proto = "repo")
 load("//third_party:se_curl/workspace.bzl", repo_se_curl = "repo")
 load("//third_party:tinyxml2/workspace.bzl", repo_tinyxml2 = "repo")
 load("//third_party:toolchains_llvm/workspace.bzl", repo_toolchains_llvm = "repo")
+load("..third_party::com_facebook_rocksdb/workspace.bzl", repo_com_facebook_rocksdb = "repo")
 
 def third_party_dependencies():
     repo_aws_c_auth()
@@ -124,3 +125,4 @@ def third_party_dependencies():
     repo_se_curl()
     repo_tinyxml2()
     repo_toolchains_llvm()
+    repo_com_facebook_rocksdb()
