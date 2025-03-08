@@ -18,6 +18,8 @@ tensorstore_cc_library(
     srcs = ["rocksdb_key_value_store.cc"],
     hdrs = ["rocksdb_key_value_store.h"],
     deps = [
+        "//tensorstore/internal:data_copy_concurrency_resource",
+        ":validate",
         "//tensorstore:context",
         "//tensorstore:transaction",
         "//tensorstore/internal:intrusive_ptr",
@@ -41,10 +43,20 @@ tensorstore_cc_library(
         "@com_google_absl//absl/time",
         "@com_google_absl//absl/types:optional",
         "@com_facebook_rocksdb//:rocksdb",
-        "//tensorstore/internal:data_copy_concurrency_resource",
 
-
-        
     ],
     alwayslink = 1,
 )
+
+tensorstore_cc_library(
+    name = "validate",
+    srcs = ["validate.cc"],
+    hdrs = ["validate.h"],
+    deps = [
+        "//tensorstore/internal:utf8",
+        "//tensorstore/kvstore:generation",
+        "@com_google_absl//absl/strings",
+    ],
+)
+
+

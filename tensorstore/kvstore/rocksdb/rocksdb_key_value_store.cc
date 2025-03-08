@@ -52,6 +52,7 @@
 #include "tensorstore/kvstore/operations.h"
 #include "tensorstore/kvstore/read_result.h"
 #include "tensorstore/kvstore/registry.h"
+#include "tensorstore/kvstore/rocksdb/validate.h"
 #include "tensorstore/kvstore/spec.h"
 #include "tensorstore/kvstore/supported_features.h"
 #include "tensorstore/kvstore/transaction.h"
@@ -65,8 +66,13 @@
 #include "tensorstore/util/str_cat.h"
 using namespace std;
 
+using rocksdb::Status;
+using ::tensorstore::internal::DataCopyConcurrencyResource;
+using ::tensorstore::internal_storage_rocksdb::IsValidStorageGeneration;
+using ::tensorstore::kvstore::ReadResult;
+
 namespace tensorstore {
-namespace internal_rocksdb_kvstore {
+namespace {
 
 TimestampedStorageGeneration GenerationNow(StorageGeneration generation) {
   return TimestampedStorageGeneration{std::move(generation), absl::Now()};
@@ -74,23 +80,23 @@ TimestampedStorageGeneration GenerationNow(StorageGeneration generation) {
 
 namespace jb = tensorstore::internal_json_binding;
 
-using rocksdb::Status;
-using ::tensorstore::internal::DataCopyConcurrencyResource;
-using ::tensorstore::kvstore::ReadResult;
-
 struct RocksDBSpecData {
-  bool create_if_missing = false;  // Create DB if it doesn't exist
+  bool create_if_missing = false;
+  std::string database_name;
   Context::Resource<DataCopyConcurrencyResource> data_copy_concurrency;
 
   constexpr static auto ApplyMembers = [](auto& x, auto f) {
     cout << "RocksDBSpecData" << endl;
-    return f(x.create_if_missing, x.data_copy_concurrency);
+    return f(x.create_if_missing, x.data_copy_concurrency, x.database_name);
   };
 
   constexpr static auto default_json_binder = jb::Object(
       jb::Member("create_if_missing",
                  jb::Projection<&RocksDBSpecData::create_if_missing>(
                      jb::DefaultValue([](auto* y) { *y = true; }))),
+      jb::Member("database_name",
+                 jb::Projection<&RocksDBSpecData::database_name>(
+                     jb::DefaultValue([](auto* y) { *y = "testdb"; }))),
       jb::Member(DataCopyConcurrencyResource::id,
                  jb::Projection<&RocksDBSpecData::data_copy_concurrency>()));
 };
@@ -105,7 +111,7 @@ class RocksDBSpec
   Future<kvstore::DriverPtr> DoOpen() const override;
 
   Result<std::string> ToUrl(std::string_view path) const override {
-    return absl::StrCat(id, "://", internal::PercentEncodeUriPath(path));
+    return absl::StrCat(id, "://", path);
   }
 };
 
@@ -160,12 +166,11 @@ class RocksDB
 absl::Status RocksDB::OpenDB() {
   rocksdb::Options options;
   options.create_if_missing = spec_.create_if_missing;
-  std::cout << "Opening DB with createIfMissing: " << spec_.create_if_missing
-            << endl;
-  std::string db_path = "testdb";
-  Status status = rocksdb::DB::Open(options, db_path, &db_);
-
+  std::cout << "Opening DB with Name: " << spec_.database_name << endl;
+  Status status = rocksdb::DB::Open(options, spec_.database_name, &db_);
+  std::cout << "Status: " << status.ToString() << std::endl;
   if (!status.ok()) {
+    std::cerr << "Error opening RocksDB database: " << status.ToString();
     return absl::InternalError(
         absl::StrCat("RocksDB::Open failed: ", status.ToString()));
   }
@@ -188,17 +193,27 @@ void RocksDB::Close() {
 Future<kvstore::DriverPtr> RocksDBSpec::DoOpen() const {
   std::cout << "RocksDB::DoOpen Creating pointer to RocksDB" << endl;
   auto driver = internal::MakeIntrusivePtr<RocksDB>();
+  std::cout << "------" << data_.create_if_missing << "-----------" << endl;
   driver->spec_ = data_;
   cout << "RocksDBSpec::DoOpen Done" << endl;
   auto status = driver->OpenDB();  // Try to open DB immediately. Errors will be
                                    // caught by the caller.
-  return driver;
+
+  if (!status.ok()) {
+    return status;
+  } else {
+    return driver;
+  }
 }
 
 Future<ReadResult> RocksDB::Read(Key key, ReadOptions options) {
   std::cout << "\nEntering RocksDB::Read " << std::endl;
   absl::Cord value;
-  std::string result_value;
+
+  if (!IsValidStorageGeneration(options.generation_conditions.if_equal) ||
+      !IsValidStorageGeneration(options.generation_conditions.if_not_equal)) {
+    return absl::InvalidArgumentError("Malformed Generation");
+  }
 
   return internal_kvstore_batch::HandleBatchRequestByGenericByteRangeCoalescing(
       *this, std::move(key), std::move(options));
@@ -206,6 +221,8 @@ Future<ReadResult> RocksDB::Read(Key key, ReadOptions options) {
 
 Future<kvstore::ReadResult> RocksDB::ReadImpl(Key&& key,
                                               ReadOptions&& options) {
+  std::cout << "Inside ReadImpl. ";
+
   auto [promise, future] = PromiseFuturePair<ReadResult>::Make();
   if (!db_) {
     promise.SetResult(absl::InternalError("Database not open"));
@@ -217,8 +234,8 @@ Future<kvstore::ReadResult> RocksDB::ReadImpl(Key&& key,
   Status status = db_->Get(rocksdb::ReadOptions(), key, &value);
   Status status_gen = db_->Get(rocksdb::ReadOptions(), gen_key, &gen_number);
 
-  std::cout << "Key is : " << key << "  Value is : " << value
-            << "  Generation number is : " << gen_number << endl;
+  std::cout << "Key is : " << key << " Value is : " << value
+            << " Generation number is : " << gen_number << endl;
 
   // Key found
   if (status.ok() && status_gen.ok()) {
@@ -322,6 +339,7 @@ absl::Status RocksDB::WriteToRocksDB(
     return absl::FailedPreconditionError("Generation Unknown");
   }
 
+  // No value is given, delete the key
   if (!value) {
     auto status = db_->Delete(rocksdb::WriteOptions(), key);
     auto generation_status = db_->Delete(rocksdb::WriteOptions(), gen_key);
@@ -333,7 +351,9 @@ absl::Status RocksDB::WriteToRocksDB(
           absl::StrCat("RocksDB Delete failed: ", status.ToString()));
     }
     promise.SetResult(GenerationNow(StorageGeneration::NoValue()));
-    return absl::OkStatus();
+    // return absl::OkStatus();
+    return absl::InternalError(
+        absl::StrCat("No value: Deleting key", status.ToString()));
   }
 
   // Convert Cord type to string
@@ -363,15 +383,14 @@ absl::Status RocksDB::WriteToRocksDB(
   return absl::OkStatus();
 }
 
-}  // namespace internal_rocksdb_kvstore
+}  // namespace
 }  // namespace tensorstore
    // namespace tensorstore
 
-TENSORSTORE_DECLARE_GARBAGE_COLLECTION_NOT_REQUIRED(
-    tensorstore::internal_rocksdb_kvstore::RocksDB)
+TENSORSTORE_DECLARE_GARBAGE_COLLECTION_NOT_REQUIRED(tensorstore::RocksDB)
 
 namespace {
 const tensorstore::internal_kvstore::DriverRegistration<
-    tensorstore::internal_rocksdb_kvstore::RocksDBSpec>
+    tensorstore::RocksDBSpec>
     registration;
 }  // namespace
