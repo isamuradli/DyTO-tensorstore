@@ -22,10 +22,9 @@ int main() {
 
   auto spec = tensorstore::Spec::FromJson({{"driver", "zarr"},
                                            {"kvstore",
-                                            {
-                                                {"driver", "rocksdb"},
-                                                {"path", "output.zarr"},
-                                            }},
+                                            {{"driver", "rocksdb"},
+                                             {"path", "output.zarr"},
+                                             {"database_name", "mydb"}}},
                                            {"metadata",
                                             {
                                                 {"dtype", "<i4"},
